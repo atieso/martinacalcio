@@ -155,17 +155,38 @@ async function getMatchDetails(fixtureId, date) {
   });
 }
 
+// A single, cached request for all Martina fixtures. No player-level data is needed.
+async function getTeamFixtures() {
+  return cached('team-fixtures', 15 * 60 * 1000, async () => {
+    const response = await football('fixtures', { league, season, team: teamId });
+    return {
+      league, season, teamId: Number(teamId), updatedAt: new Date().toISOString(),
+      fixtures: response.map(compactFixture).filter(f => f.id && f.date)
+    };
+  });
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', 'http://localhost');
   const pathname = url.pathname;
   if (req.method !== 'GET') return send(res, 405, { error: 'Method not allowed' });
   if (pathname === '/health') return send(res, 200, {
-    ok: true, configured: Boolean(apiKey), available: ['/health', '/standings', '/match-details']
+    ok: true, configured: Boolean(apiKey), available: ['/health', '/standings', '/match-details', '/team-fixtures']
   }, { 'cache-control': 'no-store' });
-  if (!['/standings', '/match-details'].includes(pathname)) {
-    return send(res, 404, { error: 'Not found', available: ['/health', '/standings', '/match-details'] });
+  if (!['/standings', '/match-details', '/team-fixtures'].includes(pathname)) {
+    return send(res, 404, { error: 'Not found', available: ['/health', '/standings', '/match-details', '/team-fixtures'] });
   }
   if (!apiKey) return send(res, 503, { error: 'API_FOOTBALL_KEY not configured' }, { 'cache-control': 'no-store' });
+
+  if (pathname === '/team-fixtures') {
+    try {
+      const result = await getTeamFixtures();
+      return send(res, 200, { ...result.data, cached: result.cached });
+    } catch (error) {
+      console.error('Team fixtures lookup failed:', error.message);
+      return send(res, 502, { error: 'Calendario Martina temporaneamente non disponibile' }, { 'cache-control': 'no-store' });
+    }
+  }
 
   if (pathname === '/match-details') {
     const fixture = url.searchParams.get('fixture');
