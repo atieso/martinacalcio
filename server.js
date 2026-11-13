@@ -166,17 +166,65 @@ async function getTeamFixtures() {
   });
 }
 
+// Goal scorers are derived from actual goal events only. Incomplete coverage is reported.
+async function getTeamGoals() {
+  return cached('team-goals', 6 * 3600 * 1000, async () => {
+    const {data:fixtureData}=await getTeamFixtures();
+    const finished=fixtureData.fixtures.filter(f=>['FT','AET','PEN'].includes(f.status));
+    const goals=new Map();let checked=0,failed=0,missingEvents=0;
+    // Concurrency bounded to avoid API rate spikes. Do not infer undocumented events.
+    for(let offset=0;offset<finished.length;offset+=3){
+      const batch=finished.slice(offset,offset+3);
+      const responses=await Promise.allSettled(batch.map(f=>football('fixtures/events',{fixture:f.id})));
+      for(let j=0;j<batch.length;j++){
+        const result=responses[j],f=batch[j];
+        if(result.status!=='fulfilled'){failed++;continue;}
+        checked++;
+        const events=result.value;
+        if(!events.length){missingEvents++;continue;}
+        for(const e of events){
+          if(Number(e.team?.id)!==Number(teamId)||e.type!=='Goal')continue;
+          const detail=String(e.detail||'').toLowerCase();
+          // Own goals by a Martina player are scored for the opponent, not for Martina.
+          if(detail.includes('own goal'))continue;
+          const id=e.player?.id;
+          const name=e.player?.name;
+          if(!id&&!name)continue;
+          const key=id?'id:'+id:'name:'+name.toLowerCase();
+          const item=goals.get(key)||{id:id||null,name:name||'',goals:0,fixtures:[]};
+          item.goals++;item.fixtures.push({fixtureId:f.id,minute:e.time?.elapsed??null,detail:e.detail||''});
+          goals.set(key,item);
+        }
+      }
+    }
+    return {league,season,teamId:Number(teamId),updatedAt:new Date().toISOString(),
+      totalFinishedFixtures:finished.length,checkedFixtures:checked,failedFixtures:failed,fixturesWithoutEvents:missingEvents,
+      complete:failed===0&&missingEvents===0,
+      scorers:[...goals.values()].sort((a,b)=>b.goals-a.goals||a.name.localeCompare(b.name))};
+  });
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', 'http://localhost');
   const pathname = url.pathname;
   if (req.method !== 'GET') return send(res, 405, { error: 'Method not allowed' });
   if (pathname === '/health') return send(res, 200, {
-    ok: true, configured: Boolean(apiKey), available: ['/health', '/standings', '/match-details', '/team-fixtures']
+    ok: true, configured: Boolean(apiKey), available: ['/health', '/standings', '/match-details', '/team-fixtures', '/team-goals']
   }, { 'cache-control': 'no-store' });
-  if (!['/standings', '/match-details', '/team-fixtures'].includes(pathname)) {
-    return send(res, 404, { error: 'Not found', available: ['/health', '/standings', '/match-details', '/team-fixtures'] });
+  if (!['/standings', '/match-details', '/team-fixtures', '/team-goals'].includes(pathname)) {
+    return send(res, 404, { error: 'Not found', available: ['/health', '/standings', '/match-details', '/team-fixtures', '/team-goals'] });
   }
   if (!apiKey) return send(res, 503, { error: 'API_FOOTBALL_KEY not configured' }, { 'cache-control': 'no-store' });
+
+  if (pathname === '/team-goals') {
+    try {
+      const result=await getTeamGoals();
+      return send(res,200,{...result.data,cached:result.cached});
+    } catch(error){
+      console.error('Team goals lookup failed:',error.message);
+      return send(res,502,{error:'Marcatori temporaneamente non disponibili'},{'cache-control':'no-store'});
+    }
+  }
 
   if (pathname === '/team-fixtures') {
     try {
